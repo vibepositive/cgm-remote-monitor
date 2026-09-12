@@ -16,4 +16,11 @@ $(document).ready(function() {
 	automationVisualization.src = 'js/uam-smb-visualization.js';
 	automationVisualization.async = true;
 	document.body.appendChild(automationVisualization);
+
+	// Presentation-only cleanup for the custom insulin overlay. Automated dose
+	// amounts remain available on hover while the graph itself stays uncluttered.
+	var automationCleanup = document.createElement('script');
+	automationCleanup.src = 'js/uam-smb-cleanup.js';
+	automationCleanup.async = true;
+	document.body.appendChild(automationCleanup);
 });
