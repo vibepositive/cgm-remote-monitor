@@ -11,6 +11,7 @@
     capped: '#f59e0b'
   };
   var MATCH_WINDOW_MS = 2 * 60 * 1000;
+  var NATIVE_MATCH_WINDOW_MS = 30 * 1000;
   var CACHE_PADDING_MS = 15 * 60 * 1000;
   var cache = { start: 0, end: 0, treatments: [], devicestatus: [] };
   var fetching = false;
@@ -207,6 +208,67 @@
     };
   }
 
+  function dedupeEvents(events) {
+    var seen = {};
+    return events.filter(function (event) {
+      var time = itemTime(event.treatment);
+      var bucket = Number.isFinite(time) ? Math.round(time / 1000) : 0;
+      var key = bucket + '|' + String(event.treatment.eventType || '') + '|' + Number(event.insulin || 0).toFixed(3);
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+
+  function nativeTreatmentMarkers(container) {
+    var containerRect = container.getBoundingClientRect();
+    return Array.prototype.slice.call(container.querySelectorAll('g.draggable-treatment')).map(function (node) {
+      var treatment = node.__data__ || {};
+      var insulin = n(treatment.insulin);
+      if (insulin === null || insulin <= 0) return null;
+      var rect = node.getBoundingClientRect();
+      var time = itemTime(treatment);
+      if (!Number.isFinite(time)) return null;
+      return {
+        node: node,
+        treatment: treatment,
+        insulin: insulin,
+        carbs: n(treatment.carbs),
+        time: time,
+        x: rect.left + rect.width / 2 - containerRect.left,
+        y: rect.top + rect.height / 2 - containerRect.top
+      };
+    }).filter(Boolean);
+  }
+
+  function nearestNativeMarker(event, markers, used) {
+    var time = itemTime(event.treatment);
+    var insulin = n(event.insulin);
+    var best = null;
+    var bestScore = Infinity;
+    markers.forEach(function (marker, index) {
+      if (used[index]) return;
+      if (insulin !== null && Math.abs(marker.insulin - insulin) > 0.05) return;
+      var diff = Math.abs(marker.time - time);
+      if (diff > NATIVE_MATCH_WINDOW_MS) return;
+      var score = diff + Math.abs(marker.insulin - insulin) * 100000;
+      if (score < bestScore) {
+        best = { marker: marker, index: index };
+        bestScore = score;
+      }
+    });
+    if (!best) return null;
+    used[best.index] = true;
+    return best.marker;
+  }
+
+  function hideNativeInsulinMarker(marker) {
+    if (!marker || !marker.node) return;
+    if (marker.node.getAttribute('data-uam-smb-hidden') === '1') return;
+    marker.node.setAttribute('data-uam-smb-hidden', '1');
+    marker.node.style.display = 'none';
+  }
+
   function svgEl(name, attrs) {
     var el = document.createElementNS('http://www.w3.org/2000/svg', name);
     Object.keys(attrs || {}).forEach(function (key) { el.setAttribute(key, attrs[key]); });
@@ -313,22 +375,34 @@
       var time = itemTime(event.treatment);
       return time >= scale.start && time <= scale.end;
     }).sort(function (a, b) { return itemTime(a.treatment) - itemTime(b.treatment); });
+    events = dedupeEvents(events);
 
-    var baseY = 62;
-    var label = svgEl('text', { x: 7, y: baseY - 15, fill: 'rgba(255,255,255,.62)', 'font-size': 10, 'font-weight': 700 });
-    label.textContent = 'CLASSIFIED INSULIN';
-    ui.overlay.appendChild(label);
+    var nativeMarkers = nativeTreatmentMarkers(scale.container);
+    var usedNative = {};
+    var fallbackIndex = 0;
 
-    events.forEach(function (event, index) {
-      var x = scale.xForTime(itemTime(event.treatment));
-      if (x < -10 || x > scale.width + 10) return;
-      var y = baseY + ((index % 3) * 20);
+    events.forEach(function (event) {
+      var nativeMarker = nearestNativeMarker(event, nativeMarkers, usedNative);
+      var x;
+      var y;
+
+      if (nativeMarker) {
+        x = nativeMarker.x;
+        y = nativeMarker.y;
+        hideNativeInsulinMarker(nativeMarker);
+      } else {
+        x = scale.xForTime(itemTime(event.treatment));
+        y = 62 + ((fallbackIndex % 3) * 20);
+        fallbackIndex += 1;
+      }
+
+      if (x < -10 || x > scale.width + 10 || y < -10 || y > scale.height + 10) return;
       var group = svgEl('g', { transform: 'translate(' + x + ',' + y + ')', tabindex: '0', role: 'button', 'aria-label': event.label + ' ' + event.insulin + ' units' });
       group.style.pointerEvents = 'all';
       group.style.cursor = 'help';
       group.innerHTML = marker(event.type);
       var amount = svgEl('text', { x: 0, y: -11, 'text-anchor': 'middle', fill: COLORS[event.type], 'font-size': 9, 'font-weight': 800 });
-      amount.textContent = event.insulin.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+      amount.textContent = event.insulin.toFixed(2).replace(/0+$/, '').replace(/\.$/, '') + ' U';
       group.appendChild(amount);
 
       var show = function () {
@@ -337,7 +411,9 @@
         var left = x + 12;
         if (left + 280 > scale.width) left = Math.max(8, x - 292);
         ui.tooltip.style.left = left + 'px';
-        ui.tooltip.style.top = Math.min(scale.height - 185, y + 18) + 'px';
+        var tooltipTop = y + 18;
+        if (tooltipTop + 185 > scale.height) tooltipTop = Math.max(8, y - 193);
+        ui.tooltip.style.top = tooltipTop + 'px';
       };
       var hide = function () { ui.tooltip.style.display = 'none'; };
       group.addEventListener('mouseenter', show);
@@ -357,7 +433,14 @@
     });
   }
 
-  function scheduleRender() {
+  function scheduleRender(mutations) {
+    if (Array.isArray(mutations)) {
+      var onlyOurChanges = mutations.length && mutations.every(function (mutation) {
+        var target = mutation.target;
+        return target && target.closest && (target.closest('.uam-smb-v2-overlay') || target.closest('.uam-smb-v2-tooltip') || target.closest('.uam-smb-v2-legend'));
+      });
+      if (onlyOurChanges) return;
+    }
     clearTimeout(renderTimer);
     renderTimer = setTimeout(render, 250);
   }
