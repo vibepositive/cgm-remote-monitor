@@ -13,7 +13,7 @@ $(document).ready(function() {
 	// Kept separate from Nightscout's dosing and treatment logic so it can be
 	// removed or updated without changing any therapy behavior.
 	var automationVisualization = document.createElement('script');
-	automationVisualization.src = 'js/uam-smb-visualization.js';
+	automationVisualization.src = 'js/uam-smb-classification-v2.js';
 	automationVisualization.async = true;
 	document.body.appendChild(automationVisualization);
 });
