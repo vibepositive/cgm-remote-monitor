@@ -9,11 +9,10 @@ $(document).ready(function() {
 	console.log('Application got ready event');
 	window.Nightscout.client.init();
 
-	// Custom read-only visualization for Trio insulin automation events.
-	// Kept separate from Nightscout's dosing and treatment logic so it can be
-	// removed or updated without changing any therapy behavior.
-	var automationVisualization = document.createElement('script');
-	automationVisualization.src = 'js/uam-smb-classification-v2.js';
-	automationVisualization.async = true;
-	document.body.appendChild(automationVisualization);
+	// Read-only Trio insulin classification overlay. This only changes chart
+	// presentation; it does not alter Nightscout treatment or dosing behavior.
+	var classifiedInsulin = document.createElement('script');
+	classifiedInsulin.src = 'js/classified-insulin-events.js?v=20260912-1';
+	classifiedInsulin.async = true;
+	document.body.appendChild(classifiedInsulin);
 });
