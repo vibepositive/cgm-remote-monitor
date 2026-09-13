@@ -4,7 +4,12 @@
   if (window.__classifiedInsulinEventsLoaded) return;
   window.__classifiedInsulinEventsLoaded = true;
 
-  var COLORS = { manual: '#3b82f6', smb: '#8b5cf6', uam: '#14b8a6', capped: '#f59e0b' };
+  var COLORS = {
+    manual: '#3b82f6',
+    smb: '#8b5cf6',
+    uam: '#14b8a6',
+    capped: '#f59e0b'
+  };
   var MATCH_WINDOW_MS = 2 * 60 * 1000;
   var CACHE_PADDING_MS = 15 * 60 * 1000;
   var cache = { start: 0, end: 0, treatments: [], devicestatus: [] };
@@ -40,18 +45,22 @@
     if (!container) return null;
     var svg = container.querySelector('svg:not(.classified-insulin-overlay)');
     if (!svg) return null;
+
     var ticks = Array.prototype.slice.call(container.querySelectorAll('.chart-focus .x.axis .tick')).map(function (node) {
       var raw = node.__data__;
       var time = raw instanceof Date ? raw.getTime() : Date.parse(raw);
       var pt = getTransformXY(node);
       return pt && Number.isFinite(time) ? { time: time, x: pt.x } : null;
     }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
+
     if (ticks.length < 2) return null;
     var first = ticks[0], last = ticks[ticks.length - 1];
     var ppm = (last.x - first.x) / (last.time - first.time);
     if (!Number.isFinite(ppm) || ppm === 0) return null;
+
     var width = container.clientWidth || Number(svg.getAttribute('width')) || 0;
     var height = container.clientHeight || Number(svg.getAttribute('height')) || 0;
+
     return {
       container: container,
       width: width,
@@ -81,21 +90,31 @@
     if (cache.start <= start && cache.end >= end && cache.treatments.length) return Promise.resolve(cache);
     if (fetching) return Promise.resolve(cache);
     fetching = true;
-    var s = start - CACHE_PADDING_MS, e = end + CACHE_PADDING_MS;
+    var s = start - CACHE_PADDING_MS;
+    var e = end + CACHE_PADDING_MS;
+
     return Promise.all([
       fetchJson(apiUrl('/api/v1/treatments.json', s, e, 5000)),
       fetchJson(apiUrl('/api/v1/devicestatus.json', s, e, 10000))
     ]).then(function (r) {
-      cache = { start: s, end: e, treatments: Array.isArray(r[0]) ? r[0] : [], devicestatus: Array.isArray(r[1]) ? r[1] : [] };
+      cache = {
+        start: s,
+        end: e,
+        treatments: Array.isArray(r[0]) ? r[0] : [],
+        devicestatus: Array.isArray(r[1]) ? r[1] : []
+      };
       return cache;
     }).catch(function (err) {
       console.warn('Classified insulin events could not load Nightscout data:', err);
       return cache;
-    }).finally(function () { fetching = false; });
+    }).finally(function () {
+      fetching = false;
+    });
   }
 
   function suggestedFromStatus(status) {
-    return status && status.openaps ? (status.openaps.suggested || status.openaps.enacted || null) : null;
+    if (!status || !status.openaps) return null;
+    return status.openaps.suggested || status.openaps.enacted || null;
   }
 
   function microbolusAmount(s) {
@@ -116,41 +135,66 @@
 
   function uamPred(s) {
     if (!s) return null;
-    if (s.predBGs && Array.isArray(s.predBGs.UAM) && s.predBGs.UAM.length) return n(s.predBGs.UAM[s.predBGs.UAM.length - 1]);
+    if (s.predBGs && Array.isArray(s.predBGs.UAM) && s.predBGs.UAM.length) {
+      return n(s.predBGs.UAM[s.predBGs.UAM.length - 1]);
+    }
     var m = String(s.reason || '').match(/UAMpredBG\s+(-?[\d.]+)/i);
     return m ? Number(m[1]) : null;
   }
 
   function nearestDecision(treatment, statuses) {
-    var tt = itemTime(treatment), insulin = n(treatment.insulin), best = null, bestDiff = Infinity;
+    var tt = itemTime(treatment);
+    var insulin = n(treatment.insulin);
+    var best = null;
+    var bestDiff = Infinity;
+
     statuses.forEach(function (status) {
       var s = suggestedFromStatus(status);
       if (!s) return;
       var amount = microbolusAmount(s);
       if (amount === null) return;
       if (insulin !== null && Math.abs(amount - insulin) > 0.08) return;
+
       var st = itemTime(status);
       if (!Number.isFinite(st)) st = itemTime(s);
       if (!Number.isFinite(st)) return;
+
       var diff = Math.abs(st - tt);
       if (diff <= MATCH_WINDOW_MS && diff < bestDiff) {
         best = { suggested: s, diff: diff };
         bestDiff = diff;
       }
     });
+
     return best;
   }
 
   function classify(treatment, statuses) {
     var insulin = n(treatment && treatment.insulin);
     if (insulin === null || insulin <= 0) return null;
-    var eventType = String(treatment.eventType || '').toUpperCase();
+
+    var eventType = String(treatment.eventType || '').trim().toUpperCase();
+
     if (eventType !== 'SMB') {
-      return { type: 'manual', label: 'Manual bolus', insulin: insulin, treatment: treatment, evidence: 'Nightscout eventType: ' + (treatment.eventType || 'Bolus') };
+      return {
+        type: 'manual',
+        label: 'Manual bolus',
+        insulin: insulin,
+        treatment: treatment,
+        evidence: 'Nightscout eventType is ' + (treatment.eventType || 'Bolus')
+      };
     }
 
     var match = nearestDecision(treatment, statuses);
-    if (!match) return { type: 'smb', label: 'SMB', insulin: insulin, treatment: treatment, evidence: 'No matching Trio decision found' };
+    if (!match) {
+      return {
+        type: 'smb',
+        label: 'SMB',
+        insulin: insulin,
+        treatment: treatment,
+        evidence: 'No matching Trio decision found'
+      };
+    }
 
     var s = match.suggested;
     var reason = String(s.reason || '');
@@ -158,16 +202,21 @@
     var hasUamPrediction = Boolean(s.predBGs && Array.isArray(s.predBGs.UAM) && s.predBGs.UAM.length);
     var reasonMentionsUam = /UAM/i.test(reason);
     var explicitZeroCob = cob !== null ? cob <= 0.1 : /COB:\s*0(?:\.0+)?(?:\D|$)/i.test(reason);
-    var hasNoCobField = cob === null && !/COB:/i.test(reason);
-    var uamDriven = (hasUamPrediction || reasonMentionsUam) && (explicitZeroCob || hasNoCobField);
-    var max = maxBolus(s), insulinReq = n(s.insulinReq);
-    var capped = uamDriven && max !== null && insulinReq !== null && Math.abs(insulin - max) <= 0.08 && insulinReq > max + 0.05;
+    var noCobEvidence = cob === null && !/COB:/i.test(reason);
+    var uamDriven = (hasUamPrediction || reasonMentionsUam) && (explicitZeroCob || noCobEvidence);
+
+    var max = maxBolus(s);
+    var insulinReq = n(s.insulinReq);
+    var capByDose = max !== null && Math.abs(insulin - max) <= 0.08;
+    var capByRequirement = insulinReq !== null && max !== null && insulinReq > max + 0.05;
+    var reasonMentionsCap = /maxBolus|limited by|max smb|max uam/i.test(reason);
+    var capped = uamDriven && capByDose && (capByRequirement || reasonMentionsCap);
 
     var evidence = [];
     if (hasUamPrediction) evidence.push('UAM prediction present');
     else if (reasonMentionsUam) evidence.push('decision reason references UAM');
     if (explicitZeroCob) evidence.push('COB is 0');
-    if (capped) evidence.push('dose equals maxBolus while insulinReq is higher');
+    if (capped) evidence.push('delivered dose reached UAM/SMB cap');
     if (!uamDriven) evidence.push('UAM not established as active driver');
 
     return {
@@ -195,15 +244,24 @@
     });
   }
 
-  function hideNativeInsulinGroups(container) {
-    Array.prototype.slice.call(container.querySelectorAll('svg g')).forEach(function (node) {
-      if (node.closest && node.closest('svg.classified-insulin-overlay')) return;
+  function hideNativeInsulinMarkers(container) {
+    Array.prototype.slice.call(container.querySelectorAll('svg:not(.classified-insulin-overlay) text')).forEach(function (text) {
+      var value = String(text.textContent || '').trim();
+      if (!/^\d+(?:\.\d+)?\s*U$/i.test(value)) return;
+      var group = text.closest ? text.closest('g') : text.parentNode;
+      if (!group) return;
+      group.setAttribute('data-classified-insulin-native', '1');
+    });
+
+    Array.prototype.slice.call(container.querySelectorAll('svg:not(.classified-insulin-overlay) *')).forEach(function (node) {
       var d = node.__data__;
       if (!d || typeof d !== 'object') return;
       var insulin = n(d.insulin);
+      if (insulin === null || insulin <= 0) return;
       var eventType = String(d.eventType || '').toUpperCase();
-      if (insulin !== null && insulin > 0 && (eventType === 'SMB' || eventType === 'BOLUS' || eventType.indexOf('BOLUS') >= 0)) {
-        node.setAttribute('data-classified-insulin-native', '1');
+      if (eventType === 'SMB' || eventType === 'BOLUS' || eventType.indexOf('BOLUS') >= 0) {
+        var group = node.closest ? node.closest('g') : null;
+        (group || node).setAttribute('data-classified-insulin-native', '1');
       }
     });
   }
@@ -212,7 +270,7 @@
     if (document.getElementById('classified-insulin-style')) return;
     var style = document.createElement('style');
     style.id = 'classified-insulin-style';
-    style.textContent = '[data-classified-insulin-native="1"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}';
+    style.textContent = '[data-classified-insulin-native="1"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}.classified-insulin-legend{user-select:none;}';
     document.head.appendChild(style);
   }
 
@@ -227,8 +285,8 @@
     var c = scale.container;
     if (window.getComputedStyle(c).position === 'static') c.style.position = 'relative';
 
-    Array.prototype.slice.call(c.querySelectorAll('.uam-smb-legend,.uam-smb-v2-legend,.uam-smb-v2-tooltip,svg.uam-smb-overlay,svg.uam-smb-v2-overlay')).forEach(function (n) {
-      if (n && n.parentNode) n.parentNode.removeChild(n);
+    Array.prototype.slice.call(c.querySelectorAll('.uam-smb-legend,.uam-smb-v2-legend,.uam-smb-v2-tooltip,svg.uam-smb-overlay,svg.uam-smb-v2-overlay')).forEach(function (node) {
+      if (node && node.parentNode) node.parentNode.removeChild(node);
     });
 
     var overlay = c.querySelector('svg.classified-insulin-overlay');
@@ -245,8 +303,14 @@
     if (!legend) {
       legend = document.createElement('div');
       legend.className = 'classified-insulin-legend';
-      legend.style.cssText = 'position:absolute;top:8px;right:10px;z-index:25;padding:7px 10px;border:1px solid rgba(255,255,255,.2);border-radius:9px;background:rgba(20,24,32,.9);color:#f8fafc;font:600 11px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;pointer-events:none';
-      legend.innerHTML = '<div style="font-size:10px;opacity:.72;margin-bottom:5px">CLASSIFIED INSULIN EVENTS</div><div style="display:flex;gap:10px"><span style="color:' + COLORS.manual + '">▲ Manual</span><span style="color:' + COLORS.smb + '">◆ SMB</span><span style="color:' + COLORS.uam + '">● UAM SMB</span><span style="color:' + COLORS.capped + '">◎ UAM cap</span></div>';
+      legend.style.cssText = 'position:absolute;top:8px;right:10px;z-index:25;padding:7px 10px;border:1px solid rgba(255,255,255,.2);border-radius:9px;background:rgba(20,24,32,.92);color:#f8fafc;font:600 11px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;pointer-events:none';
+      legend.innerHTML = '<div style="font-size:10px;opacity:.72;margin-bottom:5px">CLASSIFIED INSULIN EVENTS</div>' +
+        '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+        '<span style="color:' + COLORS.manual + '">▲ Manual</span>' +
+        '<span style="color:' + COLORS.smb + '">◆ SMB</span>' +
+        '<span style="color:' + COLORS.uam + '">● UAM SMB</span>' +
+        '<span style="color:' + COLORS.capped + '">◎ UAM cap</span>' +
+        '</div>';
       c.appendChild(legend);
     }
 
@@ -254,18 +318,19 @@
     if (!tooltip) {
       tooltip = document.createElement('div');
       tooltip.className = 'classified-insulin-tooltip';
-      tooltip.style.cssText = 'position:absolute;display:none;z-index:30;min-width:210px;max-width:310px;padding:9px 11px;border:1px solid rgba(255,255,255,.2);border-radius:9px;background:rgba(15,18,24,.97);color:#f8fafc;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;pointer-events:none';
+      tooltip.style.cssText = 'position:absolute;display:none;z-index:30;min-width:215px;max-width:320px;padding:9px 11px;border:1px solid rgba(255,255,255,.2);border-radius:9px;background:rgba(15,18,24,.97);color:#f8fafc;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;pointer-events:none';
       c.appendChild(tooltip);
     }
+
     return { overlay: overlay, tooltip: tooltip };
   }
 
   function marker(type) {
     var color = COLORS[type];
-    if (type === 'manual') return '<path d="M0,-8 L8,7 L-8,7 Z" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
-    if (type === 'smb') return '<path d="M0,-8 L8,0 L0,8 L-8,0 Z" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
-    if (type === 'capped') return '<circle r="8" fill="rgba(245,158,11,.18)" stroke="' + color + '" stroke-width="3"/><circle r="3" fill="' + color + '"/>';
-    return '<circle r="7" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
+    if (type === 'manual') return '<path d="M0,-9 L9,8 L-9,8 Z" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
+    if (type === 'smb') return '<path d="M0,-9 L9,0 L0,9 L-9,0 Z" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
+    if (type === 'capped') return '<circle r="9" fill="rgba(245,158,11,.12)" stroke="' + color + '" stroke-width="3"/><circle r="3" fill="' + color + '"/>';
+    return '<circle r="8" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
   }
 
   function tooltipHtml(e) {
@@ -284,32 +349,44 @@
 
   function draw(scale, data) {
     var ui = ensureUi(scale);
-    hideNativeInsulinGroups(scale.container);
+    hideNativeInsulinMarkers(scale.container);
     while (ui.overlay.firstChild) ui.overlay.removeChild(ui.overlay.firstChild);
 
-    var events = dedupeEvents(data.treatments.map(function (t) { return classify(t, data.devicestatus); }).filter(Boolean).filter(function (e) {
+    var events = dedupeEvents(data.treatments.map(function (t) {
+      return classify(t, data.devicestatus);
+    }).filter(Boolean).filter(function (e) {
       var time = itemTime(e.treatment);
       return time >= scale.start && time <= scale.end;
-    }).sort(function (a, b) { return itemTime(a.treatment) - itemTime(b.treatment); }));
+    }).sort(function (a, b) {
+      return itemTime(a.treatment) - itemTime(b.treatment);
+    }));
 
-    var laneY = 58;
-    var lane = svgEl('line', { x1: 0, x2: scale.width, y1: laneY, y2: laneY, stroke: 'rgba(255,255,255,.13)', 'stroke-width': 1 });
-    ui.overlay.appendChild(lane);
+    var laneY = 62;
+    var title = svgEl('text', { x: 7, y: laneY - 20, fill: 'rgba(255,255,255,.66)', 'font-size': 10, 'font-weight': 700 });
+    title.textContent = 'CLASSIFIED INSULIN';
+    ui.overlay.appendChild(title);
 
     events.forEach(function (event) {
       var x = scale.xForTime(itemTime(event.treatment));
-      if (x < -10 || x > scale.width + 10) return;
-      var g = svgEl('g', { transform: 'translate(' + x + ',' + laneY + ')', tabindex: '0', role: 'button', 'aria-label': event.label + ' ' + event.insulin + ' units' });
+      if (x < -12 || x > scale.width + 12) return;
+
+      var g = svgEl('g', {
+        transform: 'translate(' + x + ',' + laneY + ')',
+        tabindex: '0',
+        role: 'button',
+        'aria-label': event.label + ' ' + event.insulin + ' units'
+      });
       g.style.pointerEvents = 'all';
       g.style.cursor = 'help';
       g.innerHTML = marker(event.type);
+
       var show = function () {
         ui.tooltip.innerHTML = tooltipHtml(event);
         ui.tooltip.style.display = 'block';
         var left = x + 12;
-        if (left + 280 > scale.width) left = Math.max(8, x - 292);
+        if (left + 300 > scale.width) left = Math.max(8, x - 312);
         ui.tooltip.style.left = left + 'px';
-        ui.tooltip.style.top = '78px';
+        ui.tooltip.style.top = (laneY + 18) + 'px';
       };
       var hide = function () { ui.tooltip.style.display = 'none'; };
       g.addEventListener('mouseenter', show);
@@ -351,6 +428,9 @@
     setInterval(render, 15000);
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { setTimeout(start, 1200); });
-  else setTimeout(start, 1200);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { setTimeout(start, 1200); });
+  } else {
+    setTimeout(start, 1200);
+  }
 })();
